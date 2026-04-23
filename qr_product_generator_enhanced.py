@@ -380,13 +380,20 @@ def import_jobs_from_json_source(
             except Exception:
                 url = link_template.replace("{id}", raw_link_text)
         else:
-            url = raw_link_text
+            if is_valid_url(raw_link_text):
+                url = raw_link_text
+            else:
+                base = (link_template or "").strip()
+                if not base or base == "{id}":
+                    url = raw_link_text
+                else:
+                    url = f"{base.rstrip('/')}/{raw_link_text}"
 
         url = str(url).strip()
         if not is_valid_url(url):
             continue
 
-        jobs.append(QRJob(name=sanitize_filename(name, fallback=f"product_{i}"), url=url))
+        jobs.append(QRJob(name=name, url=url))
 
     if not jobs:
         raise ValueError("هیچ آیتم معتبری از ورودی JSON استخراج نشد. مسیر داده یا قالب لینک را بررسی کنید.")
@@ -447,7 +454,7 @@ def parse_batch_lines(text: str) -> List[QRJob]:
         if not is_valid_url(url):
             raise ValueError(f"خط {idx}: لینک نامعتبر است -> {url}")
 
-        jobs.append(QRJob(name=sanitize_filename(name, fallback=f"product_{idx}"), url=url))
+        jobs.append(QRJob(name=name, url=url))
 
     if not jobs:
         raise ValueError("هیچ لینک معتبری وارد نشده است.")
@@ -472,7 +479,7 @@ def parse_batch_file(path: Path) -> List[QRJob]:
                 name = (row.get(name_key) or f"product_{i}").strip() if name_key else f"product_{i}"
                 if not is_valid_url(url):
                     raise ValueError(f"ردیف {i}: لینک نامعتبر است -> {url}")
-                jobs.append(QRJob(name=sanitize_filename(name, fallback=f"product_{i}"), url=url))
+                jobs.append(QRJob(name=name, url=url))
     else:
         jobs = parse_batch_lines(path.read_text(encoding="utf-8-sig"))
 
@@ -707,7 +714,7 @@ class QRApp:
         ttk.Label(import_box, text="قالب لینک").grid(row=3, column=2, sticky="w", padx=8, pady=6)
         ttk.Entry(import_box, textvariable=self.import_link_template_var, justify="right").grid(row=3, column=3, columnspan=2, sticky="ew", padx=8, pady=6)
 
-        ttk.Label(import_box, text="می‌توانی یا لینک بدهی یا فایل JSON انتخاب کنی. پیش‌فرض: مسیر داده = data.products.data | نام = title | لینک = id").grid(row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 6))
+        ttk.Label(import_box, text="می‌توانی یا لینک بدهی یا فایل JSON انتخاب کنی. قالب لینک می‌تواند {id} یا آدرس پایه مثل https://site.com/product باشد.").grid(row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 6))
 
         import_actions = ttk.Frame(import_box)
         import_actions.grid(row=5, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 8))
