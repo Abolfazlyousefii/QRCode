@@ -140,8 +140,23 @@ def resolve_caption_direction(text: str, direction: str = "auto") -> str:
     return direction
 
 
+def normalize_persian_characters(text: str) -> str:
+    """
+    Normalize Arabic codepoints commonly seen in Persian text to Persian forms.
+    This prevents mixed Arabic/Persian glyphs such as Arabic Yeh (ي) in captions.
+    """
+    if not text:
+        return ""
+    translation_table = str.maketrans({
+        "ي": "ی",  # Arabic Yeh -> Persian Yeh
+        "ى": "ی",  # Alef Maqsura -> Persian Yeh
+        "ك": "ک",  # Arabic Kaf -> Persian Keheh
+    })
+    return text.translate(translation_table)
+
+
 def prepare_caption_text(text: str, direction: str = "auto") -> str:
-    text = (text or "").strip()
+    text = normalize_persian_characters((text or "").strip())
     if not text:
         return ""
 
