@@ -156,10 +156,94 @@ def prepare_caption_text(text: str, direction: str = "auto") -> str:
             pass
 
     # Fallback when bidi/shaping libraries are not installed.
-    # For Persian/Arabic text, reverse characters so the visible order is RTL.
-    # This is not as good as arabic_reshaper + python-bidi, but it fixes
-    # the common case of single-word captions being shown backwards.
-    return "‏" + text[::-1]
+    # 1) Convert Arabic/Persian letters to presentation forms so glyphs can join.
+    # 2) Reverse for visual RTL order in PIL's basic renderer.
+    return "‏" + shape_arabic_presentation_forms(text)[::-1]
+
+
+def shape_arabic_presentation_forms(text: str) -> str:
+    """
+    Lightweight Arabic/Persian shaping fallback.
+    Returns text with Arabic Presentation Forms so connected glyphs appear
+    even without external reshaper libraries.
+    """
+    forms: dict[str, tuple[str, Optional[str], Optional[str], Optional[str]]] = {
+        "ا": ("ﺍ", "ﺎ", None, None),
+        "آ": ("ﺁ", "ﺂ", None, None),
+        "أ": ("ﺃ", "ﺄ", None, None),
+        "إ": ("ﺇ", "ﺈ", None, None),
+        "ب": ("ﺏ", "ﺐ", "ﺑ", "ﺒ"),
+        "پ": ("ﭖ", "ﭗ", "ﭘ", "ﭙ"),
+        "ت": ("ﺕ", "ﺖ", "ﺗ", "ﺘ"),
+        "ث": ("ﺙ", "ﺚ", "ﺛ", "ﺜ"),
+        "ج": ("ﺝ", "ﺞ", "ﺟ", "ﺠ"),
+        "چ": ("ﭺ", "ﭻ", "ﭼ", "ﭽ"),
+        "ح": ("ﺡ", "ﺢ", "ﺣ", "ﺤ"),
+        "خ": ("ﺥ", "ﺦ", "ﺧ", "ﺨ"),
+        "د": ("ﺩ", "ﺪ", None, None),
+        "ذ": ("ﺫ", "ﺬ", None, None),
+        "ر": ("ﺭ", "ﺮ", None, None),
+        "ز": ("ﺯ", "ﺰ", None, None),
+        "ژ": ("ﮊ", "ﮋ", None, None),
+        "س": ("ﺱ", "ﺲ", "ﺳ", "ﺴ"),
+        "ش": ("ﺵ", "ﺶ", "ﺷ", "ﺸ"),
+        "ص": ("ﺹ", "ﺺ", "ﺻ", "ﺼ"),
+        "ض": ("ﺽ", "ﺾ", "ﺿ", "ﻀ"),
+        "ط": ("ﻁ", "ﻂ", "ﻃ", "ﻄ"),
+        "ظ": ("ﻅ", "ﻆ", "ﻇ", "ﻈ"),
+        "ع": ("ﻉ", "ﻊ", "ﻋ", "ﻌ"),
+        "غ": ("ﻍ", "ﻎ", "ﻏ", "ﻐ"),
+        "ف": ("ﻑ", "ﻒ", "ﻓ", "ﻔ"),
+        "ق": ("ﻕ", "ﻖ", "ﻗ", "ﻘ"),
+        "ک": ("ﮎ", "ﮏ", "ﮐ", "ﮑ"),
+        "ك": ("ﻙ", "ﻚ", "ﻛ", "ﻜ"),
+        "گ": ("ﮒ", "ﮓ", "ﮔ", "ﮕ"),
+        "ل": ("ﻝ", "ﻞ", "ﻟ", "ﻠ"),
+        "م": ("ﻡ", "ﻢ", "ﻣ", "ﻤ"),
+        "ن": ("ﻥ", "ﻦ", "ﻧ", "ﻨ"),
+        "و": ("ﻭ", "ﻮ", None, None),
+        "ؤ": ("ﺅ", "ﺆ", None, None),
+        "ه": ("ﻩ", "ﻪ", "ﻫ", "ﻬ"),
+        "ة": ("ﺓ", "ﺔ", None, None),
+        "ی": ("ﯼ", "ﯽ", "ﯾ", "ﯿ"),
+        "ي": ("ﻱ", "ﻲ", "ﻳ", "ﻴ"),
+        "ئ": ("ﺉ", "ﺊ", "ﺋ", "ﺌ"),
+    }
+
+    chars = list(text)
+    shaped: list[str] = []
+
+    def can_join_prev(ch: str) -> bool:
+        f = forms.get(ch)
+        return bool(f and (f[1] or f[3]))
+
+    def can_join_next(ch: str) -> bool:
+        f = forms.get(ch)
+        return bool(f and (f[2] or f[3]))
+
+    for i, ch in enumerate(chars):
+        f = forms.get(ch)
+        if not f:
+            shaped.append(ch)
+            continue
+
+        prev = chars[i - 1] if i > 0 else ""
+        nxt = chars[i + 1] if i + 1 < len(chars) else ""
+
+        join_prev = can_join_prev(ch) and can_join_next(prev)
+        join_next = can_join_next(ch) and can_join_prev(nxt)
+
+        isolated, final, initial, medial = f
+        if join_prev and join_next and medial:
+            shaped.append(medial)
+        elif join_prev and final:
+            shaped.append(final)
+        elif join_next and initial:
+            shaped.append(initial)
+        else:
+            shaped.append(isolated)
+
+    return "".join(shaped)
 
 
 def get_font(size: int, font_path: Optional[str] = None) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
