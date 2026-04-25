@@ -70,6 +70,7 @@ ERROR_LEVELS = {
 class QRJob:
     name: str
     url: str
+    code: str = ""
 
 
 @dataclass
@@ -242,40 +243,46 @@ def add_frame_and_caption(img: Image.Image, *, caption: str, options: RenderOpti
     img = img.convert("RGBA")
     frame_width = max(0, int(options.frame_width)) if options.show_frame else 0
 
-    prepared_caption = prepare_caption_text(caption, options.caption_direction) if options.show_caption else ""
+    caption_lines = []
+    if options.show_caption:
+        raw_lines = [line.strip() for line in (caption or "").splitlines() if line.strip()]
+        caption_lines = [prepare_caption_text(line, options.caption_direction) for line in raw_lines]
     base_font_size = max(10, int(options.caption_font_size or 28))
 
     text_pad_top = max(12, img.width // 32)
     text_pad_bottom = max(12, img.width // 28)
+    text_line_gap = max(4, base_font_size // 5)
 
     caption_h = 0
     font = get_font(base_font_size, options.caption_font_path)
-    caption_bbox = None
+    caption_bboxes: list[tuple[int, int, int, int]] = []
 
     canvas_w = img.width + frame_width * 2
     side_pad = max(16, frame_width + 16)
     max_text_width = max(60, canvas_w - side_pad * 2)
 
-    if prepared_caption:
+    if caption_lines:
         font_size = base_font_size
         while font_size > 10:
             trial_font = get_font(font_size, options.caption_font_path)
             tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 255))
             d = ImageDraw.Draw(tmp)
-            trial_bbox = d.textbbox((0, 0), prepared_caption, font=trial_font)
-            trial_width = trial_bbox[2] - trial_bbox[0]
+            trial_bboxes = [d.textbbox((0, 0), line, font=trial_font) for line in caption_lines]
+            trial_width = max((box[2] - box[0]) for box in trial_bboxes)
             if trial_width <= max_text_width:
                 font = trial_font
-                caption_bbox = trial_bbox
+                caption_bboxes = trial_bboxes
                 break
             font_size -= 1
 
-        if caption_bbox is None:
+        if not caption_bboxes:
             tmp = Image.new("RGBA", (10, 10), (255, 255, 255, 255))
             d = ImageDraw.Draw(tmp)
-            caption_bbox = d.textbbox((0, 0), prepared_caption, font=font)
+            caption_bboxes = [d.textbbox((0, 0), line, font=font) for line in caption_lines]
 
-        caption_h = (caption_bbox[3] - caption_bbox[1]) + text_pad_top + text_pad_bottom
+        lines_h = sum((box[3] - box[1]) for box in caption_bboxes)
+        gaps_h = text_line_gap * max(0, len(caption_bboxes) - 1)
+        caption_h = lines_h + gaps_h + text_pad_top + text_pad_bottom
 
     canvas_h = img.height + frame_width * 2 + caption_h
 
@@ -286,13 +293,16 @@ def add_frame_and_caption(img: Image.Image, *, caption: str, options: RenderOpti
         draw = ImageDraw.Draw(canvas)
         draw.rectangle((0, 0, canvas_w - 1, canvas_h - 1), outline=(0, 0, 0, 255), width=frame_width)
 
-    if prepared_caption and caption_bbox:
+    if caption_lines and caption_bboxes:
         draw = ImageDraw.Draw(canvas)
-        text_y = img.height + frame_width + text_pad_top
         fill = options.caption_color or "#000000"
-        text_w = caption_bbox[2] - caption_bbox[0]
-        text_x = max(0, (canvas_w - text_w) // 2)
-        draw.text((text_x, text_y), prepared_caption, fill=fill, font=font)
+        text_y = img.height + frame_width + text_pad_top
+        for line, box in zip(caption_lines, caption_bboxes):
+            text_w = box[2] - box[0]
+            text_h = box[3] - box[1]
+            text_x = max(0, (canvas_w - text_w) // 2)
+            draw.text((text_x, text_y), line, fill=fill, font=font)
+            text_y += text_h + text_line_gap
 
     return canvas
 
@@ -310,7 +320,8 @@ def build_final_image(job: QRJob, options: RenderOptions) -> Image.Image:
     if options.logo_path:
         qr_img = add_center_logo(qr_img, options.logo_path, options.logo_scale_percent)
 
-    return add_frame_and_caption(qr_img, caption=job.name, options=options)
+    caption_text = f"{(job.code or '').strip()}\n{job.name}".strip()
+    return add_frame_and_caption(qr_img, caption=caption_text, options=options)
 
 
 def save_qr_png(job: QRJob, output_dir: Path, options: RenderOptions) -> Path:
@@ -507,6 +518,7 @@ class QRApp:
         self.preview_source_image: Optional[Image.Image] = None
 
         self.single_url_var = tk.StringVar()
+        self.single_code_var = tk.StringVar()
         self.single_name_var = tk.StringVar(value="product_qr")
 
         self.box_size_var = tk.IntVar(value=10)
@@ -627,9 +639,20 @@ class QRApp:
         frame.pack(fill="both", expand=True, padx=10, pady=10)
         frame.columnconfigure(1, weight=1)
 
-        ttk.Label(frame, text="نام فایل / متن زیر کیوآرکد").grid(row=0, column=0, sticky="w", **pad)
+        ttk.Label(frame, text="کد محصول").grid(row=0, column=0, sticky="w", **pad)
+        code_row = ttk.Frame(frame)
+        code_row.grid(row=0, column=1, sticky="ew", **pad)
+        code_row.columnconfigure(0, weight=1)
+        code_entry = ttk.Entry(code_row, textvariable=self.single_code_var)
+        code_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Button(code_row, text="چسباندن", command=lambda: self.paste_to_stringvar(self.single_code_var, preview_after=True)).grid(row=0, column=1, padx=(8, 0))
+        code_entry.bind("<Control-v>", lambda _e: (self.paste_to_stringvar(self.single_code_var, preview_after=True), "break")[1])
+        code_entry.bind("<Shift-Insert>", lambda _e: (self.paste_to_stringvar(self.single_code_var, preview_after=True), "break")[1])
+        code_entry.bind("<KeyRelease>", lambda _e: self.safe_preview())
+
+        ttk.Label(frame, text="نام فایل / متن زیر کیوآرکد").grid(row=1, column=0, sticky="w", **pad)
         name_row = ttk.Frame(frame)
-        name_row.grid(row=0, column=1, sticky="ew", **pad)
+        name_row.grid(row=1, column=1, sticky="ew", **pad)
         name_row.columnconfigure(0, weight=1)
         name_entry = ttk.Entry(name_row, textvariable=self.single_name_var)
         name_entry.grid(row=0, column=0, sticky="ew")
@@ -638,9 +661,9 @@ class QRApp:
         name_entry.bind("<Shift-Insert>", lambda _e: (self.paste_to_stringvar(self.single_name_var, preview_after=True), "break")[1])
         name_entry.bind("<KeyRelease>", lambda _e: self.safe_preview())
 
-        ttk.Label(frame, text="لینک محصول").grid(row=1, column=0, sticky="nw", **pad)
+        ttk.Label(frame, text="لینک محصول").grid(row=2, column=0, sticky="nw", **pad)
         url_row = ttk.Frame(frame)
-        url_row.grid(row=1, column=1, sticky="ew", **pad)
+        url_row.grid(row=2, column=1, sticky="ew", **pad)
         url_row.columnconfigure(0, weight=1)
         url_entry = ttk.Entry(url_row, textvariable=self.single_url_var, justify="left")
         url_entry.grid(row=0, column=0, sticky="ew")
@@ -650,7 +673,7 @@ class QRApp:
         url_entry.bind("<Shift-Insert>", lambda _e: (self.paste_to_stringvar(self.single_url_var, preview_after=True), "break")[1])
 
         actions = ttk.Frame(frame)
-        actions.grid(row=2, column=0, columnspan=2, sticky="w", **pad)
+        actions.grid(row=3, column=0, columnspan=2, sticky="w", **pad)
         ttk.Button(actions, text="پیش‌نمایش", command=self.preview_single).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="ذخیره تصویر", command=self.save_single).pack(side="left")
 
@@ -659,7 +682,7 @@ class QRApp:
             "رنگ و اندازه متن زیر کیوآرکد قابل تغییر است.\n"
             "فارسی‌ها خودکار راست‌به‌چپ و انگلیسی‌ها خودکار چپ‌به‌راست نمایش داده می‌شوند."
         )
-        ttk.Label(frame, text=help_text, justify="left").grid(row=3, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(frame, text=help_text, justify="left").grid(row=4, column=0, columnspan=2, sticky="w", **pad)
 
     def _build_batch_tab(self, parent: ttk.Frame) -> None:
         pad = {"padx": 10, "pady": 8}
@@ -863,19 +886,21 @@ class QRApp:
             return
 
         name = self.single_name_var.get().strip() or "product_qr"
-        self.preview_source_image = build_final_image(QRJob(name=name, url=url), self.current_options())
+        code = self.single_code_var.get().strip()
+        self.preview_source_image = build_final_image(QRJob(name=name, url=url, code=code), self.current_options())
         self._render_preview_to_fit()
         self.status_var.set("پیش‌نمایش به‌روزرسانی شد و با اندازه پنجره تنظیم شد.")
 
     def save_single(self) -> None:
         url = self.single_url_var.get().strip()
         name = self.single_name_var.get().strip() or "product_qr"
+        code = self.single_code_var.get().strip()
         if not is_valid_url(url):
             messagebox.showerror("خطا", "لینک محصول معتبر نیست.")
             return
 
         out_dir = Path(self.output_dir_var.get()).expanduser()
-        path = save_qr_png(QRJob(name=name, url=url), out_dir, self.current_options())
+        path = save_qr_png(QRJob(name=name, url=url, code=code), out_dir, self.current_options())
         self.status_var.set(f"فایل ذخیره شد: {path}")
         messagebox.showinfo("انجام شد", f"تصویر ذخیره شد:\n{path}")
 
