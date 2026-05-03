@@ -28,6 +28,7 @@ import json
 import re
 import sys
 import zipfile
+import html
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -546,6 +547,84 @@ def import_jobs_from_json_url(
     )
 
 
+
+
+def extract_first_image_url(page_url: str) -> str:
+    req = Request(page_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=20) as resp:
+        charset = resp.headers.get_content_charset() or "utf-8"
+        body = resp.read().decode(charset, errors="ignore")
+
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+    ]
+    for pat in patterns:
+        m = re.search(pat, body, flags=re.IGNORECASE)
+        if m:
+            src = html.unescape(m.group(1).strip())
+            return src if src.startswith("http") else ""
+    return ""
+
+
+def download_product_images(jobs: List[QRJob], output_dir: Path) -> List[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    files: List[Path] = []
+    for i, job in enumerate(jobs, start=1):
+        img_url = extract_first_image_url(job.url)
+        if not img_url:
+            continue
+        req = Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=30) as resp:
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            ext = ".jpg"
+            if "png" in content_type:
+                ext = ".png"
+            elif "webp" in content_type:
+                ext = ".webp"
+            filename = sanitize_filename(job.name or f"product_{i}") + ext
+            path = output_dir / filename
+            path.write_bytes(resp.read())
+            files.append(path)
+    return files
+
+
+def parse_excel_file(path: Path) -> List[QRJob]:
+    try:
+        from openpyxl import load_workbook
+    except Exception as exc:  # pragma: no cover
+        raise ValueError("برای خواندن Excel باید openpyxl نصب باشد: pip install openpyxl") from exc
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("فایل اکسل خالی است.")
+    headers = [str(x).strip().lower() if x is not None else "" for x in rows[0]]
+    def find_idx(cands):
+        for c in cands:
+            if c in headers:
+                return headers.index(c)
+        return -1
+    name_idx = find_idx(["name","title","product","نام"])
+    url_idx = find_idx(["url","link","href","لینک"])
+    if url_idx < 0:
+        raise ValueError("در Excel باید ستون url یا link وجود داشته باشد.")
+    jobs=[]
+    for i, row in enumerate(rows[1:], start=1):
+        vals=list(row)
+        url=str(vals[url_idx]).strip() if url_idx < len(vals) and vals[url_idx] is not None else ""
+        name=(str(vals[name_idx]).strip() if name_idx >=0 and name_idx < len(vals) and vals[name_idx] is not None else f"product_{i}")
+        if not url:
+            continue
+        if not is_valid_url(url):
+            raise ValueError(f"ردیف {i}: لینک نامعتبر است -> {url}")
+        jobs.append(QRJob(name=name, url=url))
+    if not jobs:
+        raise ValueError("هیچ ردیف معتبری پیدا نشد.")
+    return jobs
+
 def parse_batch_lines(text: str) -> List[QRJob]:
     jobs: List[QRJob] = []
     for idx, raw_line in enumerate(text.splitlines(), start=1):
@@ -575,7 +654,9 @@ def parse_batch_file(path: Path) -> List[QRJob]:
     suffix = path.suffix.lower()
     jobs: List[QRJob] = []
 
-    if suffix in {".csv", ".tsv"}:
+    if suffix in {".xlsx", ".xlsm"}:
+        jobs = parse_excel_file(path)
+    elif suffix in {".csv", ".tsv"}:
         delimiter = "\t" if suffix == ".tsv" else ","
         with path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f, delimiter=delimiter)
@@ -1123,6 +1204,11 @@ def run_cli(args: argparse.Namespace) -> int:
 
     if args.batch_file:
         jobs = parse_batch_file(Path(args.batch_file).expanduser())
+        if args.download_images:
+            files = download_product_images(jobs, output_dir)
+            for file in files:
+                print(file)
+            return 0
         files = [save_qr_png(job, output_dir, options) for job in jobs]
         if args.zip:
             zip_path = zip_pngs(files, output_dir / "qr_codes_bundle.zip")
@@ -1139,7 +1225,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="ساخت کیوآرکد محصولات به‌صورت تصویر")
     parser.add_argument("--url", help="لینک یک محصول")
     parser.add_argument("--name", help="نام فایل خروجی بدون پسوند")
-    parser.add_argument("--batch-file", help="فایل ورودی CSV یا TXT برای ساخت گروهی")
+    parser.add_argument("--batch-file", help="فایل ورودی CSV/TSV/TXT/Excel برای ساخت گروهی")
     parser.add_argument("--output-dir", default="qr_output", help="پوشه خروجی تصویرها")
     parser.add_argument("--box-size", type=int, default=10, help="اندازه ماژول‌های کیوآرکد")
     parser.add_argument("--border", type=int, default=4, help="حاشیه داخلی کیوآرکد")
@@ -1154,6 +1240,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--direction", default="auto", choices=["auto", "rtl", "ltr"], help="جهت نوشتار متن")
     parser.add_argument("--no-caption", action="store_true", help="خاموش کردن متن زیر کیوآرکد")
     parser.add_argument("--zip", action="store_true", help="ساخت فایل ZIP در حالت گروهی")
+    parser.add_argument("--download-images", action="store_true", help="در حالت گروهی به‌جای QR، اولین عکس محصول را از صفحه لینک دانلود کن")
     return parser
 
 
